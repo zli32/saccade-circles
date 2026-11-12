@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Saccade Circles - PT</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    background: #ffffff;
+    font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    overflow: hidden;
+  }
+  #app {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+  }
+  #controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px 16px;
+    align-items: center;
+    padding: 10px 14px;
+    background: #f5f5f5;
+    border-bottom: 1px solid #ddd;
+    font-size: 14px;
+    user-select: none;
+  }
+  #controls label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
+  }
+  #controls input[type="color"] {
+    width: 32px;
+    height: 24px;
+    padding: 0;
+    border: 1px solid #ccc;
+    background: none;
+    cursor: pointer;
+  }
+  #controls input[type="range"] { width: 110px; }
+  #controls input[type="number"] { width: 64px; }
+  #controls .val { min-width: 64px; font-variant-numeric: tabular-nums; color: #333; }
+  #controls button {
+    padding: 4px 12px;
+    cursor: pointer;
+  }
+  #stage { position: relative; flex: 1; background: #ffffff; }
+  #c { position: absolute; inset: 0; width: 100%; height: 100%; display: block; background: #ffffff; }
+  #hint {
+    position: absolute;
+    left: 10px;
+    bottom: 8px;
+    font-size: 12px;
+    color: #999;
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="controls">
+    <label>Dot 1 <input type="color" id="color1" value="#000000"></label>
+    <label>Dot 2 <input type="color" id="color2" value="#ff0000"></label>
+    <label>Size <input type="range" id="sizeMm" min="2" max="30" step="0.5" value="10"><span class="val" id="sizeMmVal">10 mm</span></label>
+    <label>Speed <input type="range" id="speed" min="5" max="180" step="1" value="30"><span class="val" id="speedVal">30°/s</span></label>
+    <label>Direction
+      <select id="direction">
+        <option value="ccw" selected>CCW</option>
+        <option value="cw">CW</option>
+      </select>
+    </label>
+    <label>Padding <input type="range" id="padding" min="0" max="120" step="1" value="24"><span class="val" id="paddingVal">24 px</span></label>
+    <button id="pauseBtn">Pause</button>
+    <button id="hideBtn">Hide UI</button>
+    <button id="resetBtn" title="Reset to defaults">Reset</button>
+  </div>
+  <div id="stage">
+    <canvas id="c"></canvas>
+    <div id="hint">Space = pause · H = hide UI · F = fullscreen</div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  const stage = document.getElementById('stage');
+  const controlsEl = document.getElementById('controls');
+
+  const ui = {
+    color1: document.getElementById('color1'),
+    color2: document.getElementById('color2'),
+    sizeMm: document.getElementById('sizeMm'),
+    sizeMmVal: document.getElementById('sizeMmVal'),
+    speed: document.getElementById('speed'),
+    speedVal: document.getElementById('speedVal'),
+    direction: document.getElementById('direction'),
+    padding: document.getElementById('padding'),
+    paddingVal: document.getElementById('paddingVal'),
+    pauseBtn: document.getElementById('pauseBtn'),
+    hideBtn: document.getElementById('hideBtn'),
+    resetBtn: document.getElementById('resetBtn'),
+  };
+
+  const STORAGE_KEY = 'saccade-circles-settings-v1';
+  const DEFAULTS = {
+    color1: '#000000',
+    color2: '#ff0000',
+    sizeMm: '10',
+    speed: '30',
+    direction: 'ccw',
+    padding: '24',
+  };
+
+  function saveSettings() {
+    try {
+      const s = {
+        color1: ui.color1.value,
+        color2: ui.color2.value,
+        sizeMm: ui.sizeMm.value,
+        speed: ui.speed.value,
+        direction: ui.direction.value,
+        padding: ui.padding.value,
+      };
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(s));
+    } catch { /* private mode etc: ignore */ }
+  }
+
+  function loadSettings() {
+    let s = null;
+    try { s = JSON.parse(localStorage.getItem(STORAGE_KEY)); } catch { s = null; }
+    if (!s || typeof s !== 'object') return;
+    if (typeof s.color1 === 'string') ui.color1.value = s.color1;
+    if (typeof s.color2 === 'string') ui.color2.value = s.color2;
+    if (s.sizeMm != null) ui.sizeMm.value = s.sizeMm;
+    if (s.speed != null) ui.speed.value = s.speed;
+    if (s.direction === 'ccw' || s.direction === 'cw') ui.direction.value = s.direction;
+    if (s.padding != null) ui.padding.value = s.padding;
+  }
+
+  function resetSettings() {
+    try { localStorage.removeItem(STORAGE_KEY); } catch {}
+    ui.color1.value = DEFAULTS.color1;
+    ui.color2.value = DEFAULTS.color2;
+    ui.sizeMm.value = DEFAULTS.sizeMm;
+    ui.speed.value = DEFAULTS.speed;
+    ui.direction.value = DEFAULTS.direction;
+    ui.padding.value = DEFAULTS.padding;
+    updateLabels();
+  }
+
+  // State: defaults per spec
+  // size ~1cm = 10mm, speed 30 deg/s, CCW
+  const CSS_PX_PER_INCH = 96;
+  const MM_PER_INCH = 25.4;
+
+  let running = true;
+  let theta = 0; // radians, dot1 angle. dot2 = theta + PI. 0 = 3 o'clock, + = CCW (math convention)
+  let lastT = performance.now();
+
+  function mmToCssPx(mm) {
+    return mm / MM_PER_INCH * CSS_PX_PER_INCH;
+  }
+
+  function resize() {
+    const r = stage.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.max(1, Math.round(r.width * dpr));
+    canvas.height = Math.max(1, Math.round(r.height * dpr));
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  function updateLabels() {
+    ui.sizeMmVal.textContent = `${parseFloat(ui.sizeMm.value).toFixed(1)} mm`;
+    ui.speedVal.textContent = `${ui.speed.value}°/s`;
+    ui.paddingVal.textContent = `${ui.padding.value} px`;
+  }
+  loadSettings();
+  updateLabels();
+
+  for (const el of [ui.color1, ui.color2, ui.sizeMm, ui.speed, ui.direction, ui.padding]) {
+    el.addEventListener('input', () => { updateLabels(); saveSettings(); });
+    el.addEventListener('change', saveSettings);
+  }
+  ui.resetBtn.addEventListener('click', resetSettings);
+
+  function togglePause() {
+    running = !running;
+    ui.pauseBtn.textContent = running ? 'Pause' : 'Resume';
+    if (running) lastT = performance.now();
+  }
+  ui.pauseBtn.addEventListener('click', togglePause);
+
+  function toggleUI() {
+    const hidden = controlsEl.style.display === 'none';
+    controlsEl.style.display = hidden ? '' : 'none';
+    ui.hideBtn.textContent = hidden ? 'Hide UI' : 'Show UI';
+    // canvas size changed (stage grew); resize next frame
+    requestAnimationFrame(resize);
+  }
+  ui.hideBtn.addEventListener('click', toggleUI);
+
+  window.addEventListener('keydown', (e) => {
+    if (e.code === 'Space') { e.preventDefault(); togglePause(); }
+    else if (e.key === 'h' || e.key === 'H') toggleUI();
+    else if (e.key === 'f' || e.key === 'F') {
+      if (document.fullscreenElement) document.exitFullscreen();
+      else document.documentElement.requestFullscreen().catch(() => {});
+    }
+  });
+
+  function frame(now) {
+    const dt = Math.min(0.1, (now - lastT) / 1000); // clamp big gaps
+    lastT = now;
+
+    const speedDeg = parseFloat(ui.speed.value); // deg/sec
+    const dir = ui.direction.value === 'ccw' ? 1 : -1;
+
+    if (running) {
+      theta = (theta + dir * speedDeg * Math.PI / 180 * dt) % (Math.PI * 2);
+    }
+
+    // Layout: circle as big as window (stage) allows, padding on short edge.
+    const dpr = window.devicePixelRatio || 1;
+    const w = canvas.width / dpr;
+    const h = canvas.height / dpr;
+    const dotDiameterPx = mmToCssPx(parseFloat(ui.sizeMm.value));
+    const dotR = dotDiameterPx / 2;
+    const pad = parseFloat(ui.padding.value);
+    const radius = Math.max(0, Math.min(w, h) / 2 - pad - dotR);
+
+    const cx = w / 2;
+    const cy = h / 2;
+
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    // white background
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, w, h);
+
+    // optional faint guide circle (very light so it doesn't distract therapy)
+    if (radius > 0) {
+      ctx.strokeStyle = '#eeeeee';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    // Dot positions: 180 deg apart. y flipped so +theta = visual CCW.
+    const p1 = { x: cx + radius * Math.cos(theta), y: cy - radius * Math.sin(theta) };
+    const p2 = { x: cx + radius * Math.cos(theta + Math.PI), y: cy - radius * Math.sin(theta + Math.PI) };
+
+    ctx.fillStyle = ui.color1.value;
+    ctx.beginPath();
+    ctx.arc(p1.x, p1.y, dotR, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = ui.color2.value;
+    ctx.beginPath();
+    ctx.arc(p2.x, p2.y, dotR, 0, Math.PI * 2);
+    ctx.fill();
+
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
